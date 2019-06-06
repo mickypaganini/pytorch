@@ -21,7 +21,9 @@ import torch.nn.functional as F
 import torch.nn.parallel as dp
 import torch.nn.init as init
 import torch.nn.utils.rnn as rnn_utils
-from torch.nn.utils import clip_grad_norm_, clip_grad_value_
+from torch.nn.utils import (clip_grad_norm_, clip_grad_value_, random_pruning,
+    remove_pruning, _validate_pruning_amount_init, _validate_pruning_amount,
+    _compute_nparams_toprune)
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 from torch.autograd import Variable, gradcheck
 from torch.autograd.gradcheck import gradgradcheck
@@ -1755,6 +1757,180 @@ class TestNN(NNTestCase):
     @unittest.skipIf(not TEST_CUDA, "CUDA unavailable")
     def test_nonlinearity_propagate_nan_cuda(self):
         self._test_nonlinearity_propagate_nan('cuda')
+
+    # torch/nn/utils/prune.py
+    @unittest.skipIf(not TEST_NUMPY, "numpy not found")
+    def test_validate_pruning_amount_init(self):
+        """Test the first util function that validates the pruning
+        amount requested by the user the moment the pruning method
+        is initialized. This test checks that the expected errors are
+        raised whenever the amount is invalid.
+        The orginal function runs basic type checking + value range checks.
+        It doesn't check the validity of the pruning amount with
+        respect to the size of the tensor to prune. That's left to
+        `_validate_pruning_amount`, tested below.
+        """
+        # neither float not int should raise TypeError
+        with self.assertRaises(TypeError):
+            _validate_pruning_amount_init(amount="I'm a string")
+
+        # float not in [0, 1] should raise ValueError
+        with self.assertRaises(ValueError):
+            _validate_pruning_amount_init(amount=1.1)
+        with self.assertRaises(ValueError):
+            _validate_pruning_amount_init(amount=20.)
+
+        # negative int should raise ValueError
+        with self.assertRaises(ValueError):
+            _validate_pruning_amount_init(amount=-10)
+
+        # all these should pass without errors because they're valid amounts
+        _validate_pruning_amount_init(amount=0.34)
+        _validate_pruning_amount_init(amount=1500)
+        _validate_pruning_amount_init(amount=0)
+        _validate_pruning_amount_init(amount=0.)
+        _validate_pruning_amount_init(amount=1)
+        _validate_pruning_amount_init(amount=1.)
+        self.assertTrue(True)
+
+    @unittest.skipIf(not TEST_NUMPY, "numpy not found")
+    def test_validate_pruning_amount(self):
+        """Tests the second util function that validates the pruning
+        amount requested by the user, this time with respect to the size
+        of the tensor to prune. The rationale is that if the pruning amount,
+        converted to absolute value of units to prune, is larger than
+        the number of units in the tensor, then we expect the util function
+        to raise a value error.
+        """
+        # if amount is int and amount > tensor_size, raise ValueError
+        with self.assertRaises(ValueError):
+            _validate_pruning_amount(amount=20, tensor_size=19)
+
+        # amount is a float so this should not raise an error
+        _validate_pruning_amount(amount=0.3, tensor_size=0)
+
+        # this is okay
+        _validate_pruning_amount(amount=19, tensor_size=20)
+        _validate_pruning_amount(amount=0, tensor_size=0)
+        _validate_pruning_amount(amount=1, tensor_size=1)
+        self.assertTrue(True)
+
+    @unittest.skipIf(not TEST_NUMPY, "numpy not found")
+    def test_compute_nparams_toprune(self):
+        """Test that requested pruning `amount` gets translated into the
+        correct absolute number of units to prune.
+        """
+        self.assertEqual(_compute_nparams_toprune(amount=0, tensor_size=15), 0)
+        self.assertEqual(_compute_nparams_toprune(amount=10, tensor_size=15), 10)
+        # if 1 is int, means 1 unit
+        self.assertEqual(_compute_nparams_toprune(amount=1, tensor_size=15), 1)
+        # if 1. is float, means 100% of units
+        self.assertEqual(_compute_nparams_toprune(amount=1., tensor_size=15), 15)
+        self.assertEqual(_compute_nparams_toprune(amount=0.4, tensor_size=17), 7)
+
+    def test_random_pruning_sizes(self):
+        """Test that the new parameters and buffers created by the pruning
+        method have the same size as the input tensor to prune. These, in
+        fact, correspond to the pruned version of the tensor itself, its
+        mask, and its original copy, so the size must match.
+        """
+        # fixturize test
+        # TODO: add other modules
+        modules = [nn.Linear(5, 7), nn.Conv3d(2,2,2)]
+        names = ['weight', 'bias']
+
+        for m in modules:
+            for name in names:
+                with self.subTest(m=m, name=name):
+                    original_tensor = getattr(m, name)
+
+                    random_pruning(m, name=name, amount=0.1)
+                    # mask has the same size as tensor being pruned
+                    self.assertEqual(
+                        original_tensor.size(),
+                        getattr(m, name + '_mask').size()
+                    )
+                    # 'orig' tensor has the same size as the original tensor
+                    self.assertEqual(
+                        original_tensor.size(),
+                        getattr(m, name + '_orig').size()
+                    )
+                    # new tensor has the same size as the original tensor
+                    self.assertEqual(
+                        original_tensor.size(),
+                        getattr(m, name).size()
+                    )
+
+    def test_random_pruning_orig(self):
+        """Test that original tensor is correctly stored in 'orig'
+        after pruning is applied. Important to make sure we don't 
+        lose info about the original unpruned parameter.
+        """
+        # fixturize test
+        # TODO: add other modules
+        modules = [nn.Linear(5, 7), nn.Conv3d(2,2,2)]
+        names = ['weight', 'bias']
+
+        for m in modules:
+            for name in names:
+                with self.subTest(m=m, name=name):
+
+                    original_tensor = getattr(m, name) # tensor prior to pruning
+                    random_pruning(m, name=name, amount=0.1)
+                    self.assertEqual(
+                        original_tensor,
+                        getattr(m, name + '_orig')
+                    )
+
+    def test_random_pruning_new_weight(self):
+        """Test that module.name now contains a pruned version of
+        the original tensor obtained from multiplying it by the mask.
+        """
+        # fixturize test
+        # TODO: add other modules
+        modules = [nn.Linear(5, 7), nn.Conv3d(2,2,2)]
+        names = ['weight', 'bias']
+
+        for m in modules:
+            for name in names:
+                with self.subTest(m=m, name=name):
+
+                    original_tensor = getattr(m, name) # tensor prior to pruning
+                    random_pruning(m, name=name, amount=0.1)
+                    # weight = weight_orig * weight_mask
+                    self.assertEqual(
+                        getattr(m, name),
+                        getattr(m, name + '_orig') * getattr(m, name + '_mask').to(dtype=original_tensor.dtype)
+                    )
+
+    def test_random_pruning(self):
+        input_ = torch.ones(1, 5)
+        m = nn.Linear(5, 7)
+
+        # # mock pruning
+        # from unittest.mock import MagicMock
+        # pruned_layer = Mock()
+        # attrs = {}
+        # # random_pruning(m, name='weight', amount=0.1)
+
+
+        # calling forward twice in a row shouldn't change output
+        y1 = m(input_)
+        y2 = m(input_)
+        self.assertEqual(y1, y2)
+
+
+
+    def test_random_pruning_pickle(self):
+        modules = [nn.Linear(5, 7), nn.Conv3d(2,2,2)]
+        names = ['weight', 'bias']
+
+        for m in modules:
+            for name in names:
+                with self.subTest(m=m, name=name):
+                    random_pruning(m, name=name, amount=0.1)
+                    m_new = pickle.loads(pickle.dumps(m))
+                    self.assertIsInstance(m_new, type(m))
 
     def test_weight_norm(self):
         input = torch.randn(3, 5)
