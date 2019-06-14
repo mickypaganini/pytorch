@@ -2,6 +2,7 @@ import math
 import random
 import string
 import unittest
+from unittest import mock
 import itertools
 import contextlib
 import warnings
@@ -22,7 +23,8 @@ import torch.nn.parallel as dp
 import torch.nn.init as init
 import torch.nn.utils.rnn as rnn_utils
 from torch.nn.utils import (clip_grad_norm_, clip_grad_value_, random_pruning,
-    remove_pruning, _validate_pruning_amount_init, _validate_pruning_amount,
+    remove_pruning)
+from torch.nn.utils.prune import (_validate_pruning_amount_init, _validate_pruning_amount,
     _compute_nparams_toprune)
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 from torch.autograd import Variable, gradcheck
@@ -1903,26 +1905,117 @@ class TestNN(NNTestCase):
                         getattr(m, name + '_orig') * getattr(m, name + '_mask').to(dtype=original_tensor.dtype)
                     )
 
-    def test_random_pruning(self):
+    def test_random_pruning_0perc(self):
         input_ = torch.ones(1, 5)
-        m = nn.Linear(5, 7)
+        m = nn.Linear(5, 2)
+        y_prepruning = m(input_)  # output prior to pruning
 
-        # # mock pruning
-        # from unittest.mock import MagicMock
-        # pruned_layer = Mock()
-        # attrs = {}
-        # # random_pruning(m, name='weight', amount=0.1)
+        # compute grad pre-pruning and check it's equal to all ones
+        y_prepruning.sum().backward()
+        old_grad_weight = m.weight.grad.clone()  # don't grab pointer!
+        self.assertEqual(old_grad_weight, torch.ones_like(m.weight))
+        old_grad_bias = m.bias.grad.clone()
+        self.assertEqual(old_grad_bias, torch.ones_like(m.bias))
 
+        # remove grads
+        m.zero_grad()
+
+        # force the mask to be made of all 1s
+        with mock.patch("torch.nn.utils.prune.RandomPruningMethod.compute_mask") as compute_mask:
+            compute_mask.return_value = torch.ones_like(m.weight)
+            random_pruning(m, name='weight', amount=0.9)  # amount won't count
+
+        # with mask of 1s, output should be identical to no mask
+        y_postpruning = m(input_)
+        self.assertEqual(y_prepruning, y_postpruning)
+        
+        # with mask of 1s, grad should be identical to no mask
+        y_postpruning.sum().backward()
+        print(old_grad_weight)
+        print(m.weight_orig.grad)
+        self.assertEqual(old_grad_weight, m.weight_orig.grad)
+        self.assertEqual(old_grad_bias, m.bias.grad)
 
         # calling forward twice in a row shouldn't change output
         y1 = m(input_)
         y2 = m(input_)
         self.assertEqual(y1, y2)
 
+    def test_random_pruning(self):
+        input_ = torch.ones(1, 5)
+        m = nn.Linear(5, 2)
 
+        # define custom mask to assign with mock
+        mask = torch.ones_like(m.weight)
+        mask[1, 0] = 0
+        mask[0, 3] = 0
+
+        # check grad is zero for masked weights
+        with mock.patch("torch.nn.utils.prune.RandomPruningMethod.compute_mask") as compute_mask:
+            compute_mask.return_value = mask
+            random_pruning(m, name='weight', amount=0.9)
+
+        y_postpruning = m(input_)
+        y_postpruning.sum().backward()
+        # weight_orig is the parameter, so it's the tensor that will accumulate the grad
+        self.assertEqual(m.weight_orig.grad, mask)  # all 1s, except for masked units 
+        self.assertEqual(m.bias.grad, torch.ones_like(m.bias))
+
+        # make sure that weight_orig update doesn't modify [1, 0] and [0, 3]
+        old_weight_orig = m.weight_orig.clone()
+        # update weights
+        learning_rate = 1.
+        for p in m.parameters():
+            p.data.sub_(p.grad.data * learning_rate)
+        # since these are pruned, they should not be updated
+        self.assertEqual(old_weight_orig[1, 0], m.weight_orig[1, 0])
+        self.assertEqual(old_weight_orig[0, 3], m.weight_orig[0, 3])
+
+    def test_random_pruning_forward(self):
+        """check forward with mask (by hand).
+        """
+        input_ = torch.ones(1, 5)
+        m = nn.Linear(5, 2)
+
+        # define custom mask to assign with mock
+        mask = torch.zeros_like(m.weight)
+        mask[1, 0] = 1
+        mask[0, 3] = 1
+
+        with mock.patch("torch.nn.utils.prune.RandomPruningMethod.compute_mask") as compute_mask:
+            compute_mask.return_value = mask
+            random_pruning(m, name='weight', amount=0.9)
+
+        yhat = m(input_)
+        self.assertEqual(yhat[0, 0], m.weight_orig[0, 3] + m.bias[0])
+        self.assertEqual(yhat[0, 1], m.weight_orig[1, 0] + m.bias[1])
+
+    def test_remove_pruning(self):
+        """Remove pruning and check forward is unchanged from previous 
+        pruned state.
+        """
+        input_ = torch.ones(1, 5)
+        m = nn.Linear(5, 2)
+
+        # define custom mask to assign with mock
+        mask = torch.ones_like(m.weight)
+        mask[1, 0] = 0
+        mask[0, 3] = 0
+
+        # check grad is zero for masked weights
+        with mock.patch("torch.nn.utils.prune.RandomPruningMethod.compute_mask") as compute_mask:
+            compute_mask.return_value = mask
+            random_pruning(m, name='weight', amount=0.9)
+
+        y_postpruning = m(input_)
+
+        remove_pruning(m, 'weight')
+
+        y_postremoval = m(input_)
+        self.assertEqual(y_postpruning, y_postremoval)
 
     def test_random_pruning_pickle(self):
-        modules = [nn.Linear(5, 7), nn.Conv3d(2,2,2)]
+        modules = [nn.Linear(5, 7), nn.Conv3d(2 ,2, 2)]
         names = ['weight', 'bias']
 
         for m in modules:
@@ -1931,6 +2024,10 @@ class TestNN(NNTestCase):
                     random_pruning(m, name=name, amount=0.1)
                     m_new = pickle.loads(pickle.dumps(m))
                     self.assertIsInstance(m_new, type(m))
+
+# TODO: test pruning container
+
+
 
     def test_weight_norm(self):
         input = torch.randn(3, 5)
