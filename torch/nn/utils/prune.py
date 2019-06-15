@@ -6,6 +6,9 @@ from collections.abc import Iterable
 import numpy as np
 import torch
 
+# TODO: always make axis=-1 the default
+# TODO: if pruning fails, reinstate the original weight
+
 class BasePruningMethod(ABC):
 
     def __init__(self):
@@ -257,19 +260,22 @@ class PruningContainer(BasePruningMethod):
                     pruning method (of same dimensions as mask and t).
             """
             new_mask = mask  # start off from existing mask
-            new_mask = new_mask.float()
+            new_mask = new_mask.to(dtype=t.dtype)
 
             # compute a slice of t onto which the new pruning method will operate
             if method.PRUNING_TYPE == 'unstructured':
                 # prune entries of t where the mask is 1
                 slc = (mask == 1)
 
+            # for struct pruning, exclude channels that have already been
+            # entirely pruned
             elif method.PRUNING_TYPE == 'structured':
-                # prune the channels of t where the mask is not entirely zero
                 if not hasattr(method, 'axis'):
                     raise AttributeError('Pruning methods of PRUNING_TYPE '
                         '"structured" need to have the attribute `axis` defined.')
 
+                # find the channels to keep by removing the ones that have been 
+                # zeroed out already (i.e. where sum(entries) == 0)
                 n_dims = len(t.shape)  # "is this a 2D tensor? 3D? ..."
                 axis = method.axis
                 if axis == -1:
@@ -289,7 +295,7 @@ class PruningContainer(BasePruningMethod):
 
             # compute the new mask on the unpruned slice of the tensor t
             partial_mask = method.compute_mask(t[slc], default_mask=mask[slc])
-            new_mask[slc] = partial_mask.float()
+            new_mask[slc] = partial_mask.to(dtype=new_mask.dtype)
 
             return new_mask
 
@@ -428,7 +434,8 @@ class L1PruningMethod(BasePruningMethod):
         # this is here just for docstring generation for docs
         return super(L1PruningMethod, cls).apply(module, name, amount=amount)
 
-
+# TODO: decide what to do about structured pruning on 1D tensors like bias.
+#       Prune the entire tensor, or raise an error? Raising error for now.
 class RandomStructuredPruningMethod(BasePruningMethod):
     """Prune entire channels in a tensor at random.
     """
@@ -465,6 +472,10 @@ class RandomStructuredPruningMethod(BasePruningMethod):
         Raises:
             IndexError: if self.axis >= len(t.shape)
         """
+        # Check that tensor has structure (i.e. more than 1 dimension) such
+        # that the concept of "channels" makes sense
+        _validate_structured_pruning(t)
+
         # Check that self.axis is a valid axis to index t, else raise IndexError
         _validate_pruning_axis(t, self.axis)
 
@@ -501,7 +512,8 @@ class RandomStructuredPruningMethod(BasePruningMethod):
             mask = default_mask
         else:
             # apply the new structured mask on top of prior (potentially unstructured) mask
-            mask = default_mask * make_mask(t, self.axis, tensor_size, nparams_toprune)
+            mask = make_mask(t, self.axis, tensor_size, nparams_toprune)
+            mask *= default_mask.to(dtype=mask.dtype)
         return mask
 
     @classmethod
@@ -563,6 +575,9 @@ class LnStructuredPruningMethod(BasePruningMethod):
         Raises:
             IndexError: if self.axis >= len(t.shape)
         """
+        # Check that tensor has structure (i.e. more than 1 dimension) such
+        # that the concept of "channels" makes sense
+        _validate_structured_pruning(t)
         # Check that self.axis is a valid axis to index t, else raise IndexError
         _validate_pruning_axis(t, self.axis)
 
@@ -611,7 +626,9 @@ class LnStructuredPruningMethod(BasePruningMethod):
             # mask = torch.ones_like(t)
             mask = default_mask
         else:
-            mask = default_mask * make_mask(t, self.axis, topk.indices)
+            mask = make_mask(t, self.axis, topk.indices)
+            mask *= default_mask.to(dtype=mask.dtype)
+
         # TODO: it might make more sense to set largest=False to find bottom k,
         # then set mask to 1s everywhere, except where bottomk.indices says we
         # should fill in zeros.
@@ -821,21 +838,39 @@ def _validate_pruning_amount(amount, tensor_size):
             to prune.
 
     Note:
-        This does not take into account the number of parameters in the
-        tensor to be pruned, which is known only at prune.
         Inspired by scikit-learn train_test_split.
     """
+    # TODO: consider removing this check and allowing users to specify
+    # a number of units to prune that is greater than the number of units
+    # left to prune. In this case, the tensor will just be fully pruned.
     amount_type = np.asarray(amount).dtype.kind
 
     if amount_type == 'i' and amount > tensor_size:
         raise ValueError("amount={} should be smaller than the number of "
                          "parameters to prune={}".format(amount, tensor_size))
 
+def _validate_structured_pruning(t):
+    """Validation helper to check that the tensor to be pruned is multi-
+    dimensional, such that the concept of "channels" is well-defined.
+    
+    Args:
+        t (torch.Tensor): tensor representing the parameter to prune
+
+    Raises:
+        ValueError: if the tensor t is not at least 2D.
+    """
+    shape = t.shape
+    if len(shape) <= 1:
+        raise ValueError("Structured pruning can only be applied to "
+            "multidimensional tensors. Found tensor of shape "
+            "{} with {} dims".format(shape, len(shape)))
+
 def _compute_nparams_toprune(amount, tensor_size):
     """Since amount can be expressed either in absolute value or as a 
     percentage of the number of units/channels in a tensor, this utility
     function converts the percentage to absolute value to standardize
     the handling of pruning.
+
     Args:
         amount (int or float): quantity of parameters to prune.
             If float, should be between 0.0 and 1.0 and represent the
@@ -843,6 +878,7 @@ def _compute_nparams_toprune(amount, tensor_size):
             absolute number of parameters to prune.
         tensor_size (int): absolute number of parameters in the tensor
             to prune.
+
     Returns:
         int: the number of units to prune in the tensor
     """
