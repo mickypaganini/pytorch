@@ -210,9 +210,13 @@ class PruningContainer(BasePruningMethod):
             raise TypeError("{} is not a BasePruningMethod subclass".format(
                 type(method)))
         elif self._tensor_name != method._tensor_name:
-            raise ValueError("Can only add pruning methods acting on"
-                "the parameter named {} to PruningContainer {}.".format(
-                name, self) + "Found {}".format(method.name))
+            raise ValueError(
+                "Can only add pruning methods acting on "
+                "the parameter named '{}' to PruningContainer {}.".format(
+                    self._tensor_name, self
+                )
+                + " Found '{}'".format(method._tensor_name)
+            )
         # if all checks passed, add to _pruning_methods tuple
         self._pruning_methods += (method, )
 
@@ -282,7 +286,7 @@ class PruningContainer(BasePruningMethod):
                     axis = n_dims - 1  # -1 means last dimension
                 # find channels along dim = axis that aren't already tots 0ed out
                 keep_channel = (
-                    mask.sum(axis=[d for d in range(n_dims) if d != axis]) != 0
+                    mask.sum(dim=[d for d in range(n_dims) if d != axis]) != 0
                 )
                 # create slice to identify what to prune
                 slc = [slice(None)] * n_dims
@@ -517,7 +521,7 @@ class RandomStructuredPruningMethod(BasePruningMethod):
         return mask
 
     @classmethod
-    def apply(cls, module, name, amount, axis):
+    def apply(cls, module, name, amount, axis=-1):
         """Adds the forward pre-hook that enables pruning on the fly and
         the reparametrization of a tensor in terms of the original tensor
         and the pruning mask.
@@ -529,7 +533,8 @@ class RandomStructuredPruningMethod(BasePruningMethod):
                 If float, should be between 0.0 and 1.0 and represent the
                 fraction of parameters to prune. If int, it represents the 
                 absolute number of parameters to prune.
-        axis (int): index of the axis along which we define channels to prune.
+        axis (int, optional): index of the axis along which we define channels
+                to prune. Default: -1.
         """
         # this is here just for docstring generation for docs
         return super(RandomStructuredPruningMethod, cls).apply(
@@ -656,7 +661,7 @@ class LnStructuredPruningMethod(BasePruningMethod):
             module, name, amount=amount, n=n, axis=axis)
 
 
-def random_pruning(module, name, amount):
+def random_unstructured(module, name, amount):
     """Prunes tensor corresponding to parameter called `name` in `module`
     by removing the specified `amount` of units selected at random.
     Modifies module in place (and also return the modified module) 
@@ -681,7 +686,7 @@ def random_pruning(module, name, amount):
     RandomPruningMethod.apply(module, name, amount)
     return module
 
-def l1_pruning(module, name, amount):
+def l1_unstructured(module, name, amount):
     """Prunes tensor corresponding to parameter called `name` in `module`
     by removing the specified `amount` of units with the lowest L1-norm.
     Modifies module in place (and also return the modified module) 
@@ -706,7 +711,7 @@ def l1_pruning(module, name, amount):
     L1PruningMethod.apply(module, name, amount)
     return module
 
-def random_structured_pruning(module, name, amount, axis):
+def random_structured(module, name, amount, axis):
     """Prunes tensor corresponding to parameter called `name` in `module`
     by removing the specified `amount` of channels along the specified 
     `axis` selected at random.
@@ -735,7 +740,7 @@ def random_structured_pruning(module, name, amount, axis):
     RandomStructuredPruningMethod.apply(module, name, amount, axis)
     return module
 
-def ln_structured_pruning(module, name, amount, n, axis):
+def ln_structured(module, name, amount, n, axis):
     """Prunes tensor corresponding to parameter called `name` in `module`
     by removing the specified `amount` of channels along the specified 
     `axis` with the lowest L`n`-norm.
@@ -766,7 +771,7 @@ def ln_structured_pruning(module, name, amount, n, axis):
     LnStructuredPruningMethod.apply(module, name, amount, n, axis)
     return module
 
-def remove_pruning(module, name):
+def remove(module, name):
     r"""Removes the pruning reparameterization from a module and the
     pruning method from the forward hook. The pruned
     parameter named `name` remains permanently pruned, and the parameter
