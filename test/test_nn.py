@@ -23,10 +23,8 @@ import torch.nn.functional as F
 import torch.nn.parallel as dp
 import torch.nn.init as init
 import torch.nn.utils.rnn as rnn_utils
-from torch.nn.utils import (clip_grad_norm_, clip_grad_value_, random_pruning,
-    remove_pruning)
-from torch.nn.utils.prune import (_validate_pruning_amount_init, _validate_pruning_amount,
-    _compute_nparams_toprune)
+from torch.nn.utils import (clip_grad_norm_, clip_grad_value_)
+import  torch.nn.utils.prune as prune
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 from torch.autograd import Variable, gradcheck
 from torch.autograd.gradcheck import gradgradcheck
@@ -1796,25 +1794,25 @@ class TestNN(NNTestCase):
         """
         # neither float not int should raise TypeError
         with self.assertRaises(TypeError):
-            _validate_pruning_amount_init(amount="I'm a string")
+            prune._validate_pruning_amount_init(amount="I'm a string")
 
         # float not in [0, 1] should raise ValueError
         with self.assertRaises(ValueError):
-            _validate_pruning_amount_init(amount=1.1)
+            prune._validate_pruning_amount_init(amount=1.1)
         with self.assertRaises(ValueError):
-            _validate_pruning_amount_init(amount=20.)
+            prune._validate_pruning_amount_init(amount=20.)
 
         # negative int should raise ValueError
         with self.assertRaises(ValueError):
-            _validate_pruning_amount_init(amount=-10)
+            prune._validate_pruning_amount_init(amount=-10)
 
         # all these should pass without errors because they're valid amounts
-        _validate_pruning_amount_init(amount=0.34)
-        _validate_pruning_amount_init(amount=1500)
-        _validate_pruning_amount_init(amount=0)
-        _validate_pruning_amount_init(amount=0.)
-        _validate_pruning_amount_init(amount=1)
-        _validate_pruning_amount_init(amount=1.)
+        prune._validate_pruning_amount_init(amount=0.34)
+        prune._validate_pruning_amount_init(amount=1500)
+        prune._validate_pruning_amount_init(amount=0)
+        prune._validate_pruning_amount_init(amount=0.)
+        prune._validate_pruning_amount_init(amount=1)
+        prune._validate_pruning_amount_init(amount=1.)
         self.assertTrue(True)
 
     @unittest.skipIf(not TEST_NUMPY, "numpy not found")
@@ -1828,15 +1826,15 @@ class TestNN(NNTestCase):
         """
         # if amount is int and amount > tensor_size, raise ValueError
         with self.assertRaises(ValueError):
-            _validate_pruning_amount(amount=20, tensor_size=19)
+            prune._validate_pruning_amount(amount=20, tensor_size=19)
 
         # amount is a float so this should not raise an error
-        _validate_pruning_amount(amount=0.3, tensor_size=0)
+        prune._validate_pruning_amount(amount=0.3, tensor_size=0)
 
         # this is okay
-        _validate_pruning_amount(amount=19, tensor_size=20)
-        _validate_pruning_amount(amount=0, tensor_size=0)
-        _validate_pruning_amount(amount=1, tensor_size=1)
+        prune._validate_pruning_amount(amount=19, tensor_size=20)
+        prune._validate_pruning_amount(amount=0, tensor_size=0)
+        prune._validate_pruning_amount(amount=1, tensor_size=1)
         self.assertTrue(True)
 
     @unittest.skipIf(not TEST_NUMPY, "numpy not found")
@@ -1844,13 +1842,28 @@ class TestNN(NNTestCase):
         """Test that requested pruning `amount` gets translated into the
         correct absolute number of units to prune.
         """
-        self.assertEqual(_compute_nparams_toprune(amount=0, tensor_size=15), 0)
-        self.assertEqual(_compute_nparams_toprune(amount=10, tensor_size=15), 10)
+        self.assertEqual(
+            prune._compute_nparams_toprune(amount=0, tensor_size=15),
+            0
+        )
+        self.assertEqual(
+            prune._compute_nparams_toprune(amount=10, tensor_size=15),
+            10
+        )
         # if 1 is int, means 1 unit
-        self.assertEqual(_compute_nparams_toprune(amount=1, tensor_size=15), 1)
+        self.assertEqual(
+            prune._compute_nparams_toprune(amount=1, tensor_size=15),
+            1
+        )
         # if 1. is float, means 100% of units
-        self.assertEqual(_compute_nparams_toprune(amount=1., tensor_size=15), 15)
-        self.assertEqual(_compute_nparams_toprune(amount=0.4, tensor_size=17), 7)
+        self.assertEqual(
+            prune._compute_nparams_toprune(amount=1., tensor_size=15),
+            15
+        )
+        self.assertEqual(
+            prune._compute_nparams_toprune(amount=0.4, tensor_size=17),
+            7
+        )
 
     def test_random_pruning_sizes(self):
         """Test that the new parameters and buffers created by the pruning
@@ -1868,7 +1881,7 @@ class TestNN(NNTestCase):
                 with self.subTest(m=m, name=name):
                     original_tensor = getattr(m, name)
 
-                    random_pruning(m, name=name, amount=0.1)
+                    prune.random_unstructured(m, name=name, amount=0.1)
                     # mask has the same size as tensor being pruned
                     self.assertEqual(
                         original_tensor.size(),
@@ -1900,7 +1913,7 @@ class TestNN(NNTestCase):
                 with self.subTest(m=m, name=name):
 
                     original_tensor = getattr(m, name) # tensor prior to pruning
-                    random_pruning(m, name=name, amount=0.1)
+                    prune.random_unstructured(m, name=name, amount=0.1)
                     self.assertEqual(
                         original_tensor,
                         getattr(m, name + '_orig')
@@ -1920,14 +1933,19 @@ class TestNN(NNTestCase):
                 with self.subTest(m=m, name=name):
 
                     original_tensor = getattr(m, name) # tensor prior to pruning
-                    random_pruning(m, name=name, amount=0.1)
+                    prune.random_unstructured(m, name=name, amount=0.1)
                     # weight = weight_orig * weight_mask
                     self.assertEqual(
                         getattr(m, name),
-                        getattr(m, name + '_orig') * getattr(m, name + '_mask').to(dtype=original_tensor.dtype)
+                        getattr(m, name + '_orig') 
+                        * getattr(m, name + '_mask').to(
+                            dtype=original_tensor.dtype
+                        ),
                     )
 
     def test_random_pruning_0perc(self):
+        """Test that a mask of 1s does not change forward or backward.
+        """
         input_ = torch.ones(1, 5)
         m = nn.Linear(5, 2)
         y_prepruning = m(input_)  # output prior to pruning
@@ -1943,9 +1961,11 @@ class TestNN(NNTestCase):
         m.zero_grad()
 
         # force the mask to be made of all 1s
-        with mock.patch("torch.nn.utils.prune.RandomPruningMethod.compute_mask") as compute_mask:
+        with mock.patch(
+            "torch.nn.utils.prune.RandomPruningMethod.compute_mask"
+        ) as compute_mask:
             compute_mask.return_value = torch.ones_like(m.weight)
-            random_pruning(m, name='weight', amount=0.9)  # amount won't count
+            prune.random_unstructured(m, name='weight', amount=0.9)  # amount won't count
 
         # with mask of 1s, output should be identical to no mask
         y_postpruning = m(input_)
@@ -1973,9 +1993,11 @@ class TestNN(NNTestCase):
         mask[0, 3] = 0
 
         # check grad is zero for masked weights
-        with mock.patch("torch.nn.utils.prune.RandomPruningMethod.compute_mask") as compute_mask:
+        with mock.patch(
+            "torch.nn.utils.prune.RandomPruningMethod.compute_mask"
+        ) as compute_mask:
             compute_mask.return_value = mask
-            random_pruning(m, name='weight', amount=0.9)
+            prune.random_unstructured(m, name='weight', amount=0.9)
 
         y_postpruning = m(input_)
         y_postpruning.sum().backward()
@@ -2004,9 +2026,11 @@ class TestNN(NNTestCase):
         mask[1, 0] = 1
         mask[0, 3] = 1
 
-        with mock.patch("torch.nn.utils.prune.RandomPruningMethod.compute_mask") as compute_mask:
+        with mock.patch(
+            "torch.nn.utils.prune.RandomPruningMethod.compute_mask"
+        ) as compute_mask:
             compute_mask.return_value = mask
-            random_pruning(m, name='weight', amount=0.9)
+            prune.random_unstructured(m, name='weight', amount=0.9)
 
         yhat = m(input_)
         self.assertEqual(yhat[0, 0], m.weight_orig[0, 3] + m.bias[0])
@@ -2025,13 +2049,15 @@ class TestNN(NNTestCase):
         mask[0, 3] = 0
 
         # check grad is zero for masked weights
-        with mock.patch("torch.nn.utils.prune.RandomPruningMethod.compute_mask") as compute_mask:
+        with mock.patch(
+            "torch.nn.utils.prune.RandomPruningMethod.compute_mask"
+        ) as compute_mask:
             compute_mask.return_value = mask
-            random_pruning(m, name='weight', amount=0.9)
+            prune.random_unstructured(m, name='weight', amount=0.9)
 
         y_postpruning = m(input_)
 
-        remove_pruning(m, 'weight')
+        prune.remove(m, 'weight')
 
         y_postremoval = m(input_)
         self.assertEqual(y_postpruning, y_postremoval)
@@ -2043,13 +2069,151 @@ class TestNN(NNTestCase):
         for m in modules:
             for name in names:
                 with self.subTest(m=m, name=name):
-                    random_pruning(m, name=name, amount=0.1)
+                    prune.random_unstructured(m, name=name, amount=0.1)
                     m_new = pickle.loads(pickle.dumps(m))
                     self.assertIsInstance(m_new, type(m))
 
-# TODO: test pruning container
+    def test_multiple_pruning_calls(self):
+        # if you call pruning twice, the hook becomes a PruningContainer
+        m = nn.Conv3d(2 ,2, 2)
+        prune.l1_unstructured(m, name='weight', amount=0.1)
+        weight_mask0 = m.weight_mask  # save it for later sanity check
+
+        # prune again
+        prune.ln_structured(m, name='weight', amount=0.3, n=2, axis=0)
+        hook = next(iter(m._forward_pre_hooks.values()))
+        self.assertIsInstance(
+            hook,
+            torch.nn.utils.prune.PruningContainer
+        )
+        # check that container._tensor_name is correctly set no matter how 
+        # many pruning methods are in the container
+        self.assertEqual(hook._tensor_name, 'weight')
+
+        # check that the pruning container has the right length 
+        # equal to the number of pruning iters
+        self.assertEqual(len(hook), 2)  # m.weight has been pruned twice
+
+        # check that the entries of the pruning container are of the expected 
+        # type and in the expected order
+        self.assertIsInstance(hook[0], torch.nn.utils.prune.L1PruningMethod)
+        self.assertIsInstance(hook[1], torch.nn.utils.prune.LnStructuredPruningMethod)
+
+        # check that all entries that are 0 in the 1st mask are 0 in the 
+        # 2nd mask too
+        self.assertTrue(torch.all(m.weight_mask[weight_mask0 == 0] == 0))
+
+        # prune again
+        prune.ln_structured(m, name='weight', amount=0.1, n=float('inf'), axis=1)
+        # check that container._tensor_name is correctly set no matter how 
+        # many pruning methods are in the container
+        hook = next(iter(m._forward_pre_hooks.values()))
+        self.assertEqual(hook._tensor_name, 'weight')
+
+    def test_pruning_container(self):
+        # create an empty container
+        container = prune.PruningContainer()
+        container._tensor_name = 'test'
+        self.assertEqual(len(container), 0)
+
+        p = prune.L1PruningMethod(amount=2)
+        p._tensor_name = 'test'
+
+        # test adding a pruning method to a container
+        container.add_pruning_method(p)
+
+        # test error raised if tensor name is different
+        q = prune.L1PruningMethod(amount=2)
+        q._tensor_name = 'another_test'
+        with self.assertRaises(ValueError):
+            container.add_pruning_method(q)
+
+        # test that adding a non-pruning method object to a pruning container
+        # raises a TypeError
+        with self.assertRaises(TypeError):
+            container.add_pruning_method(10)
+        with self.assertRaises(TypeError):
+            container.add_pruning_method('ugh')
+
+    def test_pruning_container_compute_mask(self):
+        """Test `compute_mask` of pruning container with a known `t` and 
+        `default_mask`. Indirectly checks that Ln structured pruning is 
+        acting on the right axis.
+        """
+        # create an empty container
+        container = prune.PruningContainer()
+        container._tensor_name = 'test'
+
+        # 1) test unstructured pruning
+        # create a new pruning method
+        p = prune.L1PruningMethod(amount=2)
+        p._tensor_name = 'test'
+        # add the pruning method to the container
+        container.add_pruning_method(p)
+
+        # create tensor to be pruned
+        t = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]]).to(dtype=torch.float32)
+        # create prior mask by hand
+        default_mask = torch.tensor([[1, 1, 1, 0], [1, 1, 0, 1]])
+        # since we are pruning the two lowest magnitude units, the outcome of 
+        # the calculation should be this:
+        expected_mask = torch.tensor([[0, 0, 1, 0], [1, 1, 0, 1]])
+        computed_mask = container.compute_mask(t, default_mask)
+        self.assertEqual(expected_mask, computed_mask)
+
+        # 2) test structured pruning
+        q = prune.LnStructuredPruningMethod(amount=1, n=2, axis=0)
+        q._tensor_name = 'test'
+        container.add_pruning_method(q)
+        # since we are pruning the lowest magnitude one of the two rows, the 
+        # outcome of the calculation should be this:
+        expected_mask = torch.tensor([[0, 0, 0, 0], [1, 1, 0, 1]])
+        computed_mask = container.compute_mask(t, default_mask)
+        self.assertEqual(expected_mask, computed_mask)
+
+        # 2) test structured pruning, along another axis
+        r = prune.LnStructuredPruningMethod(amount=1, n=2, axis=1)
+        r._tensor_name = 'test'
+        container.add_pruning_method(r)
+        # since we are pruning the lowest magnitude of the four columns, the 
+        # outcome of the calculation should be this:
+        expected_mask = torch.tensor([[0, 1, 1, 0], [0, 1, 0, 1]])
+        computed_mask = container.compute_mask(t, default_mask)
+        self.assertEqual(expected_mask, computed_mask)
 
 
+    def test_l1_unstructured_pruning(self):
+        """Test that l1 unstructured pruning actually removes the lowest 
+        entries by l1 norm (by hand). It also checks that applying l1 
+        unstructured pruning more than once respects the previous mask.
+        """
+        m = nn.Linear(4, 2)
+        # modify its weight matrix by hand
+        m.weight = torch.nn.Parameter(
+            torch.tensor([[1, 2, 3, 4], [-4, -3, -2, -1]]).to(
+                dtype=torch.float32)
+        )
+
+        prune.l1_unstructured(m, 'weight', amount=2)
+        expected_weight = torch.tensor([[0, 2, 3, 4], [-4, -3, -2, 0]])
+        self.assertEqual(expected_weight, m.weight)
+
+        # check that pruning again removes the next two smallest entries
+        prune.l1_unstructured(m, 'weight', amount=2)
+        expected_weight = torch.tensor([[0, 0, 3, 4], [-4, -3, 0, 0]])
+        self.assertEqual(expected_weight, m.weight)
+
+
+    def test_ln_structured_pruning(self):
+        """Check Ln structured pruning by hand.
+        """
+
+# check that Ln structured pruning removes the lowest Ln entries (for a couple of n's)
+
+# test that remove removes (with hasattr) the hook and the reparametrization
+# test that removing from an unpruned tensor raises a value error
+
+# test that things work when tensor lives on GPU (they probably won't atm)
 
     def test_weight_norm(self):
         input = torch.randn(3, 5)
