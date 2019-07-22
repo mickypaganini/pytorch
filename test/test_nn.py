@@ -1943,6 +1943,40 @@ class TestNN(NNTestCase):
                         ),
                     )
 
+    def test_identity_pruning(self):
+        """Test that a mask of 1s does not change forward or backward.
+        """
+        input_ = torch.ones(1, 5)
+        m = nn.Linear(5, 2)
+        y_prepruning = m(input_)  # output prior to pruning
+
+        # compute grad pre-pruning and check it's equal to all ones
+        y_prepruning.sum().backward()
+        old_grad_weight = m.weight.grad.clone()  # don't grab pointer!
+        self.assertEqual(old_grad_weight, torch.ones_like(m.weight))
+        old_grad_bias = m.bias.grad.clone()
+        self.assertEqual(old_grad_bias, torch.ones_like(m.bias))
+
+        # remove grads
+        m.zero_grad()
+
+        # force the mask to be made of all 1s
+        prune.identity(m, name="weight")
+
+        # with mask of 1s, output should be identical to no mask
+        y_postpruning = m(input_)
+        self.assertEqual(y_prepruning, y_postpruning)
+
+        # with mask of 1s, grad should be identical to no mask
+        y_postpruning.sum().backward()
+        self.assertEqual(old_grad_weight, m.weight_orig.grad)
+        self.assertEqual(old_grad_bias, m.bias.grad)
+
+        # calling forward twice in a row shouldn't change output
+        y1 = m(input_)
+        y2 = m(input_)
+        self.assertEqual(y1, y2)
+
     def test_random_pruning_0perc(self):
         """Test that a mask of 1s does not change forward or backward.
         """
@@ -2214,6 +2248,64 @@ class TestNN(NNTestCase):
 # test that removing from an unpruned tensor raises a value error
 
 # test that things work when tensor lives on GPU (they probably won't atm)
+
+    def test_global_pruning(self):
+        """Test that global l1 unstructured pruning over 2 parameters removes
+        the `amount=4` smallest global weights across the 2 parameters.
+        """
+        m = nn.Linear(4, 2)
+        n = nn.Linear(3, 1)
+        # modify the weight matrices by hand
+        m.weight = torch.nn.Parameter(
+            torch.tensor([[1, 2, 3, 4], [-4, -3, -2, -1]]).to(
+                dtype=torch.float32)
+        )
+        n.weight = torch.nn.Parameter(
+            torch.tensor([[0, 0.1, -2]]).to(
+                dtype=torch.float32)
+        )
+
+        params_to_prune = (
+            (m, 'weight'),
+            (n, 'weight'),
+        )
+
+        # prune the 4 smallest weights globally by L1 magnitude
+        prune.global_unstructured(
+            params_to_prune,
+            pruning_method=prune.L1PruningMethod,
+            amount=4
+        )
+
+        expected_mweight = torch.tensor([[0, 2, 3, 4], [-4, -3, -2, 0]])
+        self.assertEqual(expected_mweight, m.weight)
+
+        expected_nweight = torch.tensor([[0, 0, -2]]).to(dtype=n.weight.dtype)
+        self.assertEqual(expected_nweight, n.weight)
+
+
+    def test_custom_from_mask_pruning(self):
+        """Test that the CustomFromMaskPruningMethod is capable of receiving
+        as input at instantiation time a custom mask, and combining it with
+        the previous default mask to generate the correct final mask.
+        """
+        # new mask
+        mask = torch.tensor([[0, 1, 1, 0], [0, 0, 1, 1]])
+        # old mask
+        default_mask = torch.tensor([[0, 0, 0, 0], [1, 1, 1, 1]])
+
+        # some tensor (not actually used)
+        t = torch.rand_like(mask.to(dtype=torch.float32))
+
+        p = prune.CustomFromMaskPruningMethod(mask=mask)
+
+        computed_mask = p.compute_mask(t, default_mask)
+        expected_mask = torch.tensor([[0, 0, 0, 0], [0, 0, 1, 1]]).to(
+            dtype=t.dtype
+        )
+
+        self.assertEqual(computed_mask, expected_mask)
+
 
     def test_weight_norm(self):
         input = torch.randn(3, 5)
