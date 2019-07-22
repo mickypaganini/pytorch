@@ -6,7 +6,6 @@ from collections.abc import Iterable
 import numpy as np
 import torch
 
-# TODO: always make axis=-1 the default
 # TODO: if pruning fails, reinstate the original weight
 
 class BasePruningMethod(ABC):
@@ -78,6 +77,7 @@ class BasePruningMethod(ABC):
             found = 0
             # there should technically be only 1 hook with hook.name == name
             # assert this using `found`
+            hooks_to_remove = []
             for k, hook in module._forward_pre_hooks.items():
                 # if it exists, take existing thing, remove hook, then 
                 # go thru normal thing
@@ -85,11 +85,15 @@ class BasePruningMethod(ABC):
                     old_method = hook
                     # # reset the tensor reparametrization
                     # module = remove_pruning(module, name)
-                    del module._forward_pre_hooks[k]
+                    # del module._forward_pre_hooks[k]
+                    hooks_to_remove.append(k)
                     found += 1
             assert found <= 1, "Avoid adding multiple pruning hooks to the\
                 same tensor {} of module {}. Use a PruningContainer.".format(
                     name, module)
+
+            for k in hooks_to_remove:
+                del module._forward_pre_hooks[k]
 
             # Apply the new pruning method, either from scratch or on top of 
             # the previous one.
@@ -308,6 +312,30 @@ class PruningContainer(BasePruningMethod):
         method = self._pruning_methods[-1]
         mask = _combine_masks(method, t, default_mask)
         return mask
+
+
+class IdentityPruningMethod(BasePruningMethod):
+    """Doesn't prune any units.
+    """
+
+    PRUNING_TYPE = "unstructured"
+
+    def compute_mask(self, t, default_mask):
+        mask = default_mask
+        return mask
+
+    @classmethod
+    def apply(cls, module, name):
+        """Adds the forward pre-hook that enables pruning on the fly and
+        the reparametrization of a tensor in terms of the original tensor
+        and the pruning mask.
+        Args:
+            module (nn.Module): module containing the tensor to prune
+            name (string): parameter name within `module` on which pruning
+                will act.
+        """
+        # this is here just for docstring generation for docs
+        return super(IdentityPruningMethod, cls).apply(module, name)
 
 
 class RandomPruningMethod(BasePruningMethod):
@@ -661,6 +689,30 @@ class LnStructuredPruningMethod(BasePruningMethod):
             module, name, amount=amount, n=n, axis=axis)
 
 
+def identity(module, name):
+    """Applies pruning reparametrization to the tensor corresponding to the
+    parameter called `name` in `module` without actually pruning any units.
+    Modifies module in place (and also return the modified module)
+    by:
+    1) adding a named buffer called `name+'_mask'` corresponding to the
+    binary mask applied to the parameter `name` by the pruning method.
+    The parameter `name` is replaced by its pruned version, while the
+    original (unpruned) parameter is stored in a new parameter named
+    `name+'_orig'`.
+    Note:
+        The mask is a tensor of ones.
+    Args:
+        module (nn.Module): module containing the tensor to prune
+        name (string): parameter name within `module` on which pruning
+                will act.
+    Returns:
+        module (nn.Module): modified (i.e. pruned) version of the input
+            module,
+    """
+    IdentityPruningMethod.apply(module, name)
+    return module
+
+
 def random_unstructured(module, name, amount):
     """Prunes tensor corresponding to parameter called `name` in `module`
     by removing the specified `amount` of units selected at random.
@@ -798,6 +850,20 @@ def remove(module, name):
 
     raise ValueError("Parameter '{}' of module {} has to be pruned "
         "before pruning can be removed".format(name, module))
+
+def is_pruned(model):
+    """Check whether `model` is pruned by looking for forward_pre_hooks in its
+    modules that inherit from the BasePruningMethod.
+    Args:
+        model (torch.nn.Module): object that is either pruned or unpruned
+    Returns:
+        binary answer to whether `model` is pruned.
+    """
+    for _, module in model.named_module():
+        for _, hook in module._forward_pre_hooks.items():
+            if isinstance(hook, prune.BasePruningMethod):
+                return True
+    return False
 
 def _validate_pruning_amount_init(amount):
     """Validation helper to check the range of amount at init.
