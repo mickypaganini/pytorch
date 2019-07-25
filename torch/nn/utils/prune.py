@@ -131,7 +131,7 @@ class BasePruningMethod(ABC):
 
         if not isinstance(method, PruningContainer):
             # copy `module[name]` to `module[name + '_orig']`
-            module.register_parameter(name + '_orig', torch.nn.Parameter(orig.data))
+            module.register_parameter(name + '_orig', orig)#torch.nn.Parameter(orig.data))
             # temporarily delete `module[name]`
             del module._parameters[name]
             default_mask = torch.ones_like(orig)  # temp

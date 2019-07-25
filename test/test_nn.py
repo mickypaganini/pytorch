@@ -2096,6 +2096,21 @@ class TestNN(NNTestCase):
         y_postremoval = m(input_)
         self.assertEqual(y_postpruning, y_postremoval)
 
+    def test_pruning_id_consistency(self):
+        """Test that pruning doesn't change the id of the parameters, which
+        would otherwise introduce issues with pre-existing optitmizers that
+        point to old parameters.
+        """
+        m = nn.Linear(5, 2, bias=False)
+
+        tensor_id = id(list(m.parameters())[0])
+
+        prune.random_unstructured(m, name="weight", amount=0.9)
+        self.assertEqual(tensor_id, id(list(m.parameters())[0]))
+
+        prune.remove(m, "weight")
+        self.assertEqual(tensor_id, id(list(m.parameters())[0]))
+
     def test_random_pruning_pickle(self):
         modules = [nn.Linear(5, 7), nn.Conv3d(2 ,2, 2)]
         names = ['weight', 'bias']
