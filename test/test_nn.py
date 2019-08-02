@@ -2252,10 +2252,44 @@ class TestNN(NNTestCase):
         expected_weight = torch.tensor([[0, 0, 3, 4], [-4, -3, 0, 0]])
         self.assertEqual(expected_weight, m.weight)
 
-
-    def test_ln_structured_pruning(self):
-        """Check Ln structured pruning by hand.
+    def test_unstructured_pruning_same_magnitude(self):
+        """Since it may happen that the tensor to prune has entries with the
+        same exact magnitude, it is important to check that pruning happens
+        consistenly based on the bottom % of weights, and not by threshold,
+        which would instead kill off *all* units with magnitude = threshold.
         """
+        AMOUNT = 0.2
+        p = prune.L1PruningMethod(amount=AMOUNT)
+        # create a random tensors with entries in {-2, 0, 2}
+        t = 2 * torch.randint(low=-1, high=2, size=(10, 7))
+        nparams_toprune = prune._compute_nparams_toprune(AMOUNT, t.nelement())
+
+        computed_mask = p.compute_mask(t, default_mask=torch.ones_like(t))
+        nparams_pruned = torch.sum(computed_mask == 0)
+        self.assertEqual(nparams_toprune, nparams_pruned)
+
+    def test_random_structured_pruning_amount(self):
+
+        AMOUNT = 0.6
+        AXIS = 2
+        p = prune.RandomStructuredPruningMethod(amount=AMOUNT, axis=AXIS)
+        t = 2 * torch.randint(low=-1, high=2, size=(5, 4, 2)).to(
+            dtype=torch.float32
+        )
+        nparams_toprune = prune._compute_nparams_toprune(AMOUNT, t.shape[AXIS])
+
+        computed_mask = p.compute_mask(t, default_mask=torch.ones_like(t))
+        # check that 1 column is fully prune, the others are left untouched
+        remaining_axes = [_ for _ in range(len(t.shape)) if _ != AXIS]
+        per_column_sums = sorted(
+            torch.sum(computed_mask == 0, axis=remaining_axes
+        ))
+        assert per_column_sums == [0, 20]
+
+
+    # def test_ln_structured_pruning(self):
+    #     """Check Ln structured pruning by hand.
+    #     """
 
 # check that Ln structured pruning removes the lowest Ln entries (for a couple of n's)
 

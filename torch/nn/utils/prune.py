@@ -131,7 +131,7 @@ class BasePruningMethod(ABC):
 
         if not isinstance(method, PruningContainer):
             # copy `module[name]` to `module[name + '_orig']`
-            module.register_parameter(name + '_orig', orig)#torch.nn.Parameter(orig.data))
+            module.register_parameter(name + '_orig', orig)
             # temporarily delete `module[name]`
             del module._parameters[name]
             default_mask = torch.ones_like(orig)  # temp
@@ -170,10 +170,11 @@ class BasePruningMethod(ABC):
 
         # delete and reset
         delattr(module, self._tensor_name)
-        del module._parameters[self._tensor_name + '_orig']
-        del module._buffers[self._tensor_name + '_mask']
-        module.register_parameter(self._tensor_name, torch.nn.Parameter(weight.data))
-
+        orig = module._parameters[self._tensor_name + "_orig"]
+        orig.data = weight.data
+        del module._parameters[self._tensor_name + "_orig"]
+        del module._buffers[self._tensor_name + "_mask"]
+        module.register_parameter(self._tensor_name, orig)
 
 class PruningContainer(BasePruningMethod):
     """Container holding a sequence of pruning methods.
@@ -374,15 +375,13 @@ class RandomPruningMethod(BasePruningMethod):
         # than the number of units in the tensor
         _validate_pruning_amount(nparams_toprune, tensor_size)
 
-        if nparams_toprune == 0:  # k=0 not supported by torch.kthvalue
-            # mask = torch.ones_like(t)
-            mask = default_mask
-        else:
-            # TODO: torch.sparse?
-            # Create random mask with nparams_nparams_toprune entries set to 0 
+        mask = default_mask.clone()
+
+        if nparams_toprune != 0:  # k=0 not supported by torch.kthvalue
             prob = torch.rand_like(t)
-            threshold = torch.kthvalue(prob.view(-1), k=nparams_toprune).values
-            mask = prob > threshold
+            topk = torch.topk(prob.view(-1), k=nparams_toprune)
+            mask.view(-1)[topk.indices] = 0
+
         return mask
 
     @classmethod
@@ -429,27 +428,20 @@ class L1PruningMethod(BasePruningMethod):
         # Compute number of units to prune: amount if int, 
         # else amount * tensor_size
         nparams_toprune = _compute_nparams_toprune(self.amount, tensor_size)
-        nparams_tokeep = tensor_size - nparams_toprune
         # This should raise an error if the number of units to prune is larger
         # than the number of units in the tensor
         _validate_pruning_amount(nparams_toprune, tensor_size)
 
-        if nparams_toprune == 0:  # k=0 not supported by torch.kthvalue
-            # mask = torch.ones_like(t)
-            mask = default_mask
-        else:
+        mask = default_mask.clone()
+
+        if nparams_toprune != 0:  # k=0 not supported by torch.kthvalue
             # largest=True --> top k; largest=False --> bottom k
-            # Keep the largest k
+            # Prune the smallest k
             topk = torch.topk(
-                torch.abs(t).view(-1),
-                k=nparams_tokeep,
-                largest=True
+                torch.abs(t).view(-1), k=nparams_toprune, largest=False
             )
             # topk will have .indices and .values
-
-            # Compute binary mask by selecting entries in t with abs value larger 
-            # than the threshold value for a parameter to make it into the top k
-            mask = torch.abs(t) >= min(topk.values)
+            mask.view(-1)[topk.indices] = 0
 
         return mask
 
