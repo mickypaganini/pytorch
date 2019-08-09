@@ -2007,8 +2007,6 @@ class TestNN(NNTestCase):
         
         # with mask of 1s, grad should be identical to no mask
         y_postpruning.sum().backward()
-        print(old_grad_weight)
-        print(m.weight_orig.grad)
         self.assertEqual(old_grad_weight, m.weight_orig.grad)
         self.assertEqual(old_grad_bias, m.bias.grad)
 
@@ -2287,16 +2285,72 @@ class TestNN(NNTestCase):
         assert per_column_sums == [0, 20]
 
 
-    # def test_ln_structured_pruning(self):
-    #     """Check Ln structured pruning by hand.
-    #     """
+    def test_ln_structured_pruning(self):
+        """Check Ln structured pruning by hand.
+        """
+        m = nn.Conv2d(3, 1, 2)
+        m.weight.data = torch.Tensor(
+            [[[[1., 2.], [1., 2.5]], 
+             [[0.5, 1.], [0.1, 0.1]],
+             [[-3., -5.], [0.1, -1.]]]]
+        )
+        # expected effect of pruning 1 of the 3 channels by L2-norm
+        expected_mask_axis1 = torch.ones_like(m.weight)
+        expected_mask_axis1[:, 1] = 0.
 
-# check that Ln structured pruning removes the lowest Ln entries (for a couple of n's)
+        prune.ln_structured(m, 'weight', amount=1, n=2, axis=1)
+        self.assertEqual(expected_mask_axis1, m.weight_mask)
 
-# test that remove removes (with hasattr) the hook and the reparametrization
-# test that removing from an unpruned tensor raises a value error
+        # expected effect of pruning 1 of the 2 columns along axis -1 by L1-norm
+        expected_mask_axis3 = expected_mask_axis1
+        expected_mask_axis3[:, :, :, 0] = 0.
 
-# test that things work when tensor lives on GPU (they probably won't atm)
+        prune.ln_structured(m, 'weight', amount=1, n=1, axis=-1)
+        self.assertEqual(expected_mask_axis3, m.weight_mask)
+
+
+    def test_remove_pruning(self):
+        """`prune.remove` removes the hook and the reparametrization
+        and makes the pruning final in the original parameter.
+        """
+        modules = [nn.Linear(5, 7), nn.Conv3d(2,2,2)]
+        names = ['weight', 'bias']
+
+        for m in modules:
+            for name in names:
+                with self.subTest(m=m, name=name):
+                    # first prune
+                    prune.random_unstructured(m, name, amount=0.5)
+                    self.assertIn(name + "_orig", dict(m.named_parameters()))
+                    self.assertIn(name + "_mask", dict(m.named_buffers()))
+                    self.assertNotIn(name, dict(m.named_parameters()))
+                    self.assertTrue(hasattr(m, name))
+                    pruned_t = getattr(m, name)
+
+                    # then remove pruning
+                    prune.remove(m, name)
+                    self.assertIn(name, dict(m.named_parameters()))
+                    self.assertNotIn(name + "_orig", dict(m.named_parameters()))
+                    self.assertNotIn(name + "_mask", dict(m.named_buffers()))
+                    final_t = getattr(m, name)
+
+                    self.assertEqual(pruned_t, final_t)
+
+    def test_remove_pruning_exception(self):
+        """Removing from an unpruned tensor throws an assertion error
+        """
+        modules = [nn.Linear(5, 7), nn.Conv3d(2,2,2)]
+        names = ['weight', 'bias']
+
+        for m in modules:
+            for name in names:
+                with self.subTest(m=m, name=name):
+                    # check that the module isn't pruned
+                    self.assertFalse(prune.is_pruned(m))
+                    # since it isn't pruned, pruning can't be removed from it
+                    with self.assertRaises(ValueError):
+                        prune.remove(m, name)
+
 
     def test_global_pruning(self):
         """Test that global l1 unstructured pruning over 2 parameters removes
@@ -2354,6 +2408,37 @@ class TestNN(NNTestCase):
         )
 
         self.assertEqual(computed_mask, expected_mask)
+
+
+    def test_pruning_rollback(self):
+        """Test that if something fails when the we try to compute the mask,
+        then the model isn't left in some intermediate half-pruned state.
+        The try/except statement in `apply` should handle rolling back 
+        to the previous state before pruning began.
+        """
+        modules = [nn.Linear(5, 7), nn.Conv3d(2,2,2)]
+        names = ['weight', 'bias']
+
+        for m in modules:
+            for name in names:
+                with self.subTest(m=m, name=name):
+
+                    with mock.patch(
+                        "torch.nn.utils.prune.L1PruningMethod.compute_mask"
+                    ) as compute_mask:
+                        compute_mask.side_effect = Exception('HA!')
+                        with self.assertRaises(Exception): 
+                            prune.l1_unstructured(m, name=name, amount=0.9)
+
+                        self.assertTrue(
+                            name in dict(m.named_parameters())
+                        )
+                        self.assertFalse(
+                            name + '_mask' in dict(m.named_buffers())
+                        )
+                        self.assertFalse(
+                            name + '_orig' in dict(m.named_parameters())
+                        )
 
 
     def test_weight_norm(self):
