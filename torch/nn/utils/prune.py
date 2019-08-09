@@ -136,26 +136,41 @@ class BasePruningMethod(ABC):
         # original tensor, prior to this iteration of pruning (not like orig orig)
         orig = getattr(module, name)
 
+        # If this is the first time pruning is applied, take care of moving 
+        # the original tensor to a new parameter called name + '_orig' and
+        # and deleting the original parameter
         if not isinstance(method, PruningContainer):
             # copy `module[name]` to `module[name + '_orig']`
             module.register_parameter(name + "_orig", orig)
             # temporarily delete `module[name]`
             del module._parameters[name]
             default_mask = torch.ones_like(orig)  # temp
-
+        # If this is not the first time pruning is applied, all of the above
+        # has been done before in a previos pruning iteration, so we're good
+        # to go
         else:
             default_mask = getattr(module, name + "_mask").detach().clone()
 
-        # get the final mask, computed according to the specific method
-        mask = method.compute_mask(orig, default_mask=default_mask)
-        # reparametrize by saving mask to `module[name + '_mask']`...
-        module.register_buffer(name + "_mask", mask)
-        # ... and the new pruned tensor to `module[name]`
-        setattr(module, name, method.apply_mask(module))
+        # Use try/except because if anything goes wrong with the mask 
+        # computation etc., you'd want to roll back.
+        try:
+            # get the final mask, computed according to the specific method
+            mask = method.compute_mask(orig, default_mask=default_mask)
+            # reparametrize by saving mask to `module[name + '_mask']`...
+            module.register_buffer(name + "_mask", mask)
+            # ... and the new pruned tensor to `module[name]`
+            setattr(module, name, method.apply_mask(module))
+            # associate the pruning method to the module via a hook to
+            # compute the function before every forward() (compile by run)
+            module.register_forward_pre_hook(method)
 
-        # associate the pruning method to the module via a hook to
-        # compute the function before every forward() (compile by run)
-        module.register_forward_pre_hook(method)
+        except Exception as e:
+            print(type(method))
+            if not isinstance(method, PruningContainer):
+                orig = getattr(module, name + "_orig")
+                module.register_parameter(name, orig)
+                del module._parameters[name + "_orig"]
+            raise e
 
         return method
 
@@ -1006,16 +1021,16 @@ def remove(module, name):
     )
 
 
-def is_pruned(model):
-    """Check whether `model` is pruned by looking for forward_pre_hooks in its
+def is_pruned(module):
+    """Check whether `module` is pruned by looking for forward_pre_hooks in its
     modules that inherit from the BasePruningMethod.
     Args:
-        model (torch.nn.Module): object that is either pruned or unpruned
+        module (torch.nn.Module): object that is either pruned or unpruned
     Returns:
-        binary answer to whether `model` is pruned.
+        binary answer to whether `module` is pruned.
     """
-    for _, module in model.named_module():
-        for _, hook in module._forward_pre_hooks.items():
+    for _, submodule in module.named_modules():
+        for _, hook in submodule._forward_pre_hooks.items():
             if isinstance(hook, BasePruningMethod):
                 return True
     return False
